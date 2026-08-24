@@ -37,6 +37,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let text = key.text_with_all_modifiers().unwrap_or_default();
+        // AquaSKK may insert NUL (\0) before characters when the
+        // "Insert NUL before characters" option is enabled. Filter it out.
+        let text = if text.contains('\0') {
+            let filtered = text.replace('\0', "");
+            if filtered.is_empty() {
+                return;
+            }
+            filtered
+        } else {
+            text.to_owned()
+        };
 
         // All key bindings are disabled while a hint is being selected.
         if self.ctx.display().hint_state.active() {
@@ -49,7 +60,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // First key after inline search is captured.
         let inline_state = self.ctx.inline_search_state();
         if inline_state.char_pending {
-            self.ctx.inline_search_input(text);
+            self.ctx.inline_search_input(&text);
             return;
         }
 
@@ -75,9 +86,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         // Mask `Alt` modifier from input when we won't send esc.
-        let mods = if self.alt_send_esc(&key, text) { mods } else { mods & !ModifiersState::ALT };
+        let mods = if self.alt_send_esc(&key, &text) { mods } else { mods & !ModifiersState::ALT };
 
-        let build_key_sequence = Self::should_build_sequence(&key, text, mode, mods);
+        let build_key_sequence = Self::should_build_sequence(&key, &text, mode, mods);
         let is_modifier_key = Self::is_modifier_key(&key);
 
         let bytes = if build_key_sequence {
