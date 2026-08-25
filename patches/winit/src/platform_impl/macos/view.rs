@@ -497,6 +497,14 @@ declare_class!(
 
             self.update_modifiers(&event, false);
 
+            // If the text was committed we must allow normal input after the commit.
+            // Do this before early returns so the state doesn't get stuck in Committed
+            // (which would suppress the next plain ASCII input after q/l).
+            let was_committed = self.ivars().ime_state.get() == ImeState::Committed;
+            if was_committed {
+                self.ivars().ime_state.set(ImeState::Ground);
+            }
+
             // Ghostty/iTerm aquaSKK bugfix: if input source changed during this event and
             // there was no marked text before, IME consumed the key (e.g., AquaSKK unified mode).
             if let Some(before) = input_source_before {
@@ -509,25 +517,27 @@ declare_class!(
             // didn't insert text and didn't forward via doCommand, and didn't change IME
             // state -> AquaSKK consumed q/l. Suppress KeyboardInput. For normal 'a' in
             // ASCII mode, handleEvent calls insertText (handle_event_text_inserted=true),
-            // so we must NOT suppress.
+            // so we must NOT suppress. Don't suppress repeats: normal key repeats must
+            // still be forwarded (q,f,j hold). Don't suppress Command shortcuts (copy/paste).
             if handle_event_handled
                 && !self.ivars().forward_key_to_app.get()
                 && !self.ivars().handle_event_text_inserted.get()
                 && !had_marked_before
                 && old_ime_state == self.ivars().ime_state.get()
+                && !unsafe { event.isARepeat() }
+                && !self.ivars().modifiers.get().state().super_key()
             {
                 return;
             }
 
-            let had_ime_input = match self.ivars().ime_state.get() {
-                ImeState::Committed => {
-                    // Allow normal input after the commit.
-                    self.ivars().ime_state.set(ImeState::Ground);
-                    true
+            let had_ime_input = if was_committed {
+                true
+            } else {
+                match self.ivars().ime_state.get() {
+                    ImeState::Preedit => true,
+                    // `key_down` could result in preedit clear, so compare old and current state.
+                    _ => old_ime_state != self.ivars().ime_state.get(),
                 }
-                ImeState::Preedit => true,
-                // `key_down` could result in preedit clear, so compare old and current state.
-                _ => old_ime_state != self.ivars().ime_state.get(),
             };
 
             if !had_ime_input || self.ivars().forward_key_to_app.get() {
