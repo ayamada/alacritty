@@ -515,26 +515,122 @@ impl<T> Term<T> {
     /// Find left end of semantic block.
     #[must_use]
     pub fn semantic_search_left(&self, point: Point) -> Point {
-        match self.inline_search_left(point, self.semantic_escape_chars()) {
-            // If we found a match, reverse for at least one cell, skipping over wide cell spacers.
-            Ok(point) => {
-                let wide_spacer = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER;
-                self.grid
+        let escape_chars = self.semantic_escape_chars();
+        let wide_spacer = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER;
+        let last_column = self.columns() - 1;
+
+        let mut point = point;
+        point.line = max(point.line, self.topmost_line());
+
+        let mut iter = self.grid.iter_from(point);
+        let mut prev_is_ascii = {
+            let cell = &self.grid[point];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                let prev = point.sub(self, Boundary::Grid, 1);
+                self.grid[prev].c.is_ascii()
+            } else if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                let next = point.add(self, Boundary::Grid, 1);
+                if next.line >= self.topmost_line() && next.line <= self.bottommost_line() {
+                    self.grid[next].c.is_ascii()
+                } else {
+                    cell.c.is_ascii()
+                }
+            } else {
+                cell.c.is_ascii()
+            }
+        };
+
+        while let Some(cell) = iter.prev() {
+            if cell.point.column == last_column && !cell.flags.contains(Flags::WRAPLINE) {
+                break;
+            }
+
+            point = cell.point;
+
+            if cell.flags.intersects(wide_spacer) {
+                continue;
+            }
+
+            if escape_chars.contains(cell.c) {
+                return self
+                    .grid
                     .iter_from(point)
-                    .find(|cell| !cell.flags.intersects(wide_spacer))
-                    .map_or(point, |cell| cell.point)
-            },
-            Err(point) => point,
+                    .find(|c| !c.flags.intersects(wide_spacer))
+                    .map_or(point, |c| c.point);
+            }
+
+            if cell.c.is_ascii() != prev_is_ascii {
+                return self
+                    .grid
+                    .iter_from(point)
+                    .find(|c| !c.flags.intersects(wide_spacer))
+                    .map_or(point, |c| c.point);
+            }
+
+            prev_is_ascii = cell.c.is_ascii();
         }
+
+        point
     }
 
     /// Find right end of semantic block.
     #[must_use]
     pub fn semantic_search_right(&self, point: Point) -> Point {
-        match self.inline_search_right(point, self.semantic_escape_chars()) {
-            Ok(point) => self.grid.iter_from(point).prev().map_or(point, |cell| cell.point),
-            Err(point) => point,
+        let escape_chars = self.semantic_escape_chars();
+        let wide_spacer = Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER;
+        let last_column = self.columns() - 1;
+
+        let mut point = point;
+        point.line = max(point.line, self.topmost_line());
+
+        if point.column == last_column && !self.grid[point].flags.contains(Flags::WRAPLINE) {
+            return point;
         }
+
+        let mut prev_is_ascii = {
+            let cell = &self.grid[point];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                let prev = point.sub(self, Boundary::Grid, 1);
+                self.grid[prev].c.is_ascii()
+            } else if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                let next = point.add(self, Boundary::Grid, 1);
+                if next.line >= self.topmost_line() && next.line <= self.bottommost_line() {
+                    self.grid[next].c.is_ascii()
+                } else {
+                    cell.c.is_ascii()
+                }
+            } else {
+                cell.c.is_ascii()
+            }
+        };
+
+        // `iter_from` yields the next cell first, which is exactly what we want to check.
+        for cell in self.grid.iter_from(point) {
+            point = cell.point;
+
+            if cell.flags.intersects(wide_spacer) {
+                if point.column == last_column && !cell.flags.contains(Flags::WRAPLINE) {
+                    break;
+                }
+                continue;
+            }
+
+            if escape_chars.contains(cell.c) {
+                return self.grid.iter_from(point).prev().map_or(point, |c| c.point);
+            }
+
+            if cell.c.is_ascii() != prev_is_ascii {
+                return self.grid.iter_from(point).prev().map_or(point, |c| c.point);
+            }
+
+            prev_is_ascii = cell.c.is_ascii();
+
+            if point.column == last_column && !cell.flags.contains(Flags::WRAPLINE) {
+                break;
+            }
+        }
+
+        point
     }
 
     /// Searching to the left, find the next character contained in `needles`.
@@ -1189,6 +1285,30 @@ mod tests {
         let end = term.semantic_search_right(Point::new(Line(0), Column(6)));
         assert_eq!(start, Point::new(Line(0), Column(6)));
         assert_eq!(end, Point::new(Line(0), Column(6)));
+    }
+
+    #[test]
+    fn ascii_multibyte_semantic() {
+        // "abc" (ascii, cols 0-2), "あいう" (wide, cols 3-8), "def" (ascii, cols 9-11)
+        // Use default escape chars (space, etc. - not present here).
+        let term = mock_term("abcあいうdef");
+        // Columns: 0:a 1:b 2:c 3:あ(2cols 3-4) 5:い(5-6) 7:う(7-8) 9:d 10:e 11:f
+        // Inside ascii block "abc" should be bounded at 0..2.
+        assert_eq!(term.semantic_search_left(Point::new(Line(0), Column(1))), Point::new(Line(0), Column(0)));
+        assert_eq!(term.semantic_search_right(Point::new(Line(0), Column(1))), Point::new(Line(0), Column(2)));
+        // Inside multibyte block "あいう" should be bounded at 3..8 (right is 8, left is 3).
+        assert_eq!(term.semantic_search_left(Point::new(Line(0), Column(5))), Point::new(Line(0), Column(3)));
+        assert_eq!(term.semantic_search_right(Point::new(Line(0), Column(5))), Point::new(Line(0), Column(8)));
+        // Inside ascii block "def" should be bounded at 9..11.
+        assert_eq!(term.semantic_search_left(Point::new(Line(0), Column(10))), Point::new(Line(0), Column(9)));
+        assert_eq!(term.semantic_search_right(Point::new(Line(0), Column(10))), Point::new(Line(0), Column(11)));
+        // Escape char should still take precedence: "abc,あ" -> "," splits even without ascii boundary.
+        let mut term2 = mock_term("abc,あ");
+        term2.config.semantic_escape_chars = ",".into();
+        // "abc" block
+        assert_eq!(term2.semantic_search_right(Point::new(Line(0), Column(0))), Point::new(Line(0), Column(2)));
+        // "あ" block isolated
+        assert_eq!(term2.semantic_search_left(Point::new(Line(0), Column(5))), Point::new(Line(0), Column(4)));
     }
 
     #[test]
