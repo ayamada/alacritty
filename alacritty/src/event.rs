@@ -2017,9 +2017,16 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     },
                     WindowEvent::Ime(ime) => match ime {
                         Ime::Commit(text) => {
+                            // AquaSKK's "Insert NUL before characters" option inserts a NUL
+                            // (\0) to signal that the following input was consumed by the IME.
+                            // Filter it out and ignore pure NUL commits.
+                            let filtered: String = text.chars().filter(|&c| c != '\0').collect();
+                            if filtered.is_empty() {
+                                return;
+                            }
                             *self.ctx.dirty = true;
                             // Don't use bracketed paste for single char input.
-                            self.ctx.paste(&text, text.chars().count() > 1);
+                            self.ctx.paste(&filtered, filtered.chars().count() > 1);
                             self.ctx.update_cursor_blinking();
                         },
                         Ime::Preedit(text, cursor_offset) => {

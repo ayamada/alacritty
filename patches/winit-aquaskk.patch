@@ -1,0 +1,127 @@
+--- a/src/platform_impl/macos/view.rs
++++ b/src/platform_impl/macos/view.rs
+@@ -131,6 +131,10 @@
+     /// to the application, even during IME
+     forward_key_to_app: Cell<bool>,
+ 
++    /// True if insertText was called during the current handleEvent handling.
++    /// Used to distinguish AquaSKK's consumed keys (q/l) from normal insertions.
++    handle_event_text_inserted: Cell<bool>,
++
+     marked_text: RefCell<Retained<NSMutableAttributedString>>,
+     accepts_first_mouse: bool,
+ 
+@@ -393,6 +397,7 @@
+         fn insert_text(&self, string: &NSObject, _replacement_range: NSRange) {
+             // TODO: Use _replacement_range, requires changing the event to report surrounding text.
+             trace_scope!("insertText:replacementRange:");
++            self.ivars().handle_event_text_inserted.set(true);
+ 
+             // SAFETY: This method is guaranteed to get either a `NSString` or a `NSAttributedString`.
+             let string = if string.is_kind_of::<NSAttributedString>() {
+@@ -457,16 +462,32 @@
+             self.ivars().forward_key_to_app.set(false);
+             let event = replace_event(event, self.option_as_alt());
+ 
+-            // The `interpretKeyEvents` function might call
+-            // `setMarkedText`, `insertText`, and `doCommandBySelector`.
+-            // It's important that we call this before queuing the KeyboardInput, because
+-            // we must send the `KeyboardInput` event during IME if it triggered
+-            // `doCommandBySelector`. (doCommandBySelector means that the keyboard input
+-            // is not handled by IME and should be handled by the application)
+-            if self.ivars().ime_allowed.get() {
+-                let events_for_nsview = NSArray::from_slice(&[&*event]);
+-                unsafe { self.interpretKeyEvents(&events_for_nsview) };
++            // Save state before handling, to detect IME that handles keys without marked text
++            // (e.g., AquaSKK's q/l toggle in non-unified mode) or that changes input source
++            // (unified mode). Mirrors iTerm2's experimentalKeyHandling + aquaSKK bugfix.
++            let had_marked_before = unsafe { self.hasMarkedText() };
++            let input_source_before = if !had_marked_before && self.is_ime_enabled() {
++                Some(self.current_input_source())
++            } else {
++                None
++            };
+ 
++            // Use handleEvent instead of interpretKeyEvents when IME is allowed.
++            // handleEvent correctly reports whether the input method consumed the event
++            // (e.g., AquaSKK's q/l in hiragana mode) even without marked text or input
++            // source change. This is the core of iTerm2's "Improved support for input
++            // method editors like AquaSKK" fix.
++            let mut handle_event_handled = false;
++            self.ivars().handle_event_text_inserted.set(false);
++            if self.ivars().ime_allowed.get() {
++                if let Some(input_context) = self.inputContext() {
++                    // handleEvent may call setMarkedText/insertText/doCommandBySelector
++                    // which update ime_state / forward_key_to_app.
++                    handle_event_handled = unsafe { input_context.handleEvent(&event) };
++                } else {
++                    let events_for_nsview = NSArray::from_slice(&[&*event]);
++                    unsafe { self.interpretKeyEvents(&events_for_nsview) };
++                }
+                 // If the text was committed we must treat the next keyboard event as IME related.
+                 if self.ivars().ime_state.get() == ImeState::Committed {
+                     // Remove any marked text, so normal input can continue.
+@@ -476,15 +497,47 @@
+ 
+             self.update_modifiers(&event, false);
+ 
+-            let had_ime_input = match self.ivars().ime_state.get() {
+-                ImeState::Committed => {
+-                    // Allow normal input after the commit.
+-                    self.ivars().ime_state.set(ImeState::Ground);
+-                    true
++            // If the text was committed we must allow normal input after the commit.
++            // Do this before early returns so the state doesn't get stuck in Committed
++            // (which would suppress the next plain ASCII input after q/l).
++            let was_committed = self.ivars().ime_state.get() == ImeState::Committed;
++            if was_committed {
++                self.ivars().ime_state.set(ImeState::Ground);
++            }
++
++            // Ghostty/iTerm aquaSKK bugfix: if input source changed during this event and
++            // there was no marked text before, IME consumed the key (e.g., AquaSKK unified mode).
++            if let Some(before) = input_source_before {
++                let after = self.current_input_source();
++                if before != after {
++                    return;
+                 }
+-                ImeState::Preedit => true,
+-                // `key_down` could result in preedit clear, so compare old and current state.
+-                _ => old_ime_state != self.ivars().ime_state.get(),
++            }
++            // iTerm experimental fix for non-unified mode: handleEvent returned YES but
++            // didn't insert text and didn't forward via doCommand, and didn't change IME
++            // state -> AquaSKK consumed q/l. Suppress KeyboardInput. For normal 'a' in
++            // ASCII mode, handleEvent calls insertText (handle_event_text_inserted=true),
++            // so we must NOT suppress. Don't suppress repeats: normal key repeats must
++            // still be forwarded (q,f,j hold). Don't suppress Command shortcuts (copy/paste).
++            if handle_event_handled
++                && !self.ivars().forward_key_to_app.get()
++                && !self.ivars().handle_event_text_inserted.get()
++                && !had_marked_before
++                && old_ime_state == self.ivars().ime_state.get()
++                && !unsafe { event.isARepeat() }
++                && !self.ivars().modifiers.get().state().super_key()
++            {
++                return;
++            }
++
++            let had_ime_input = if was_committed {
++                true
++            } else {
++                match self.ivars().ime_state.get() {
++                    ImeState::Preedit => true,
++                    // `key_down` could result in preedit clear, so compare old and current state.
++                    _ => old_ime_state != self.ivars().ime_state.get(),
++                }
+             };
+ 
+             if !had_ime_input || self.ivars().forward_key_to_app.get() {
+@@ -803,6 +856,7 @@
+             input_source: Default::default(),
+             ime_allowed: Default::default(),
+             forward_key_to_app: Default::default(),
++            handle_event_text_inserted: Default::default(),
+             marked_text: Default::default(),
+             accepts_first_mouse,
+             _ns_window: WeakId::new(&window.retain()),
