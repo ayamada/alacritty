@@ -29,6 +29,7 @@ use unicode_width::UnicodeWidthChar;
 use alacritty_terminal::event::{EventListener, OnResize, WindowSize};
 use alacritty_terminal::grid::Dimensions as TermDimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point};
+use alacritty_terminal::progress::Progress;
 use alacritty_terminal::selection::Selection;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{
@@ -385,6 +386,12 @@ pub struct Display {
     /// Font size used by the window.
     pub font_size: FontSize,
 
+    /// Current `OSC 9;4` progress report.
+    pub progress: Option<Progress>,
+
+    /// Width of the progress overlay drawn in the previous frame.
+    progress_width: usize,
+
     // Mouse point position when highlighting hints.
     hint_mouse_point: Option<Point>,
 
@@ -535,6 +542,8 @@ impl Display {
             vi_highlighted_hint: Default::default(),
             highlighted_hint: Default::default(),
             hint_mouse_point: Default::default(),
+            progress_width: Default::default(),
+            progress: Default::default(),
             pending_update: Default::default(),
             cursor_hidden: Default::default(),
             meter: Default::default(),
@@ -891,6 +900,10 @@ impl Display {
             // Show current display offset in vi-less search to indicate match position.
             self.draw_line_indicator(config, total_lines, None, display_offset);
         };
+
+        // Draw the progress overlay unless the scroll position indicator occupies the same corner.
+        let progress_obstructed = vi_cursor_point.is_some() || search_state.regex().is_some();
+        self.draw_progress(config, progress_obstructed);
 
         // Draw cursor.
         rects.extend(cursor.rects(&size_info, config.cursor.thickness()));
@@ -1325,6 +1338,34 @@ impl Display {
         );
     }
 
+    /// Draw the `OSC 9;4` progress overlay in the viewport's top-right corner.
+    #[inline(never)]
+    fn draw_progress(&mut self, config: &UiConfig, obstructed: bool) {
+        let progress = if obstructed { None } else { self.progress };
+        let text = progress.map(progress_text);
+        let width = text.as_ref().map_or(0, |text| text.chars().count());
+        let columns = self.size_info.columns();
+
+        // Damage the overlay when it is visible or when its width changes, so the terminal
+        // content below is restored when it shrinks or disappears.
+        let damage_width = width.max(self.progress_width);
+        if damage_width != 0 {
+            let left = columns.saturating_sub(damage_width);
+            let damage = LineDamageBounds::new(0, left, columns - 1);
+            self.damage_tracker.frame().damage_line(damage);
+            self.damage_tracker.next_frame().damage_line(damage);
+        }
+
+        if let (Some(text), Some(progress)) = (text, progress) {
+            let (fg, bg) = progress_colors(progress, config);
+            let point = Point::new(0, Column(columns.saturating_sub(width)));
+            let glyph_cache = &mut self.glyph_cache;
+            self.renderer.draw_string(point, fg, bg, text.chars(), &self.size_info, glyph_cache);
+        }
+
+        self.progress_width = width;
+    }
+
     /// Draw render timer.
     #[inline(never)]
     fn draw_render_timer(&mut self, config: &UiConfig) {
@@ -1631,4 +1672,48 @@ fn window_size(
     let height = (padding.1).mul_add(2., grid_height).floor();
 
     PhysicalSize::new(width as u32, height as u32)
+}
+
+/// Text to display for a progress report.
+fn progress_text(progress: Progress) -> String {
+    match progress {
+        // Hidden progress is never rendered.
+        Progress::Hidden => String::new(),
+        Progress::Normal(value) | Progress::Error(Some(value)) | Progress::Warning(Some(value)) => {
+            format!("{value}%")
+        },
+        Progress::Error(None) => "err".to_owned(),
+        Progress::Indeterminate => "...".to_owned(),
+        Progress::Warning(None) => "wrn".to_owned(),
+    }
+}
+
+/// Foreground and background colors for the progress overlay.
+fn progress_colors(progress: Progress, config: &UiConfig) -> (Rgb, Rgb) {
+    let colors = &config.colors;
+    match progress {
+        Progress::Error(_) => (colors.primary.background, colors.normal.red),
+        Progress::Warning(_) => (colors.primary.background, colors.normal.yellow),
+        _ => (
+            colors.line_indicator.foreground.unwrap_or(colors.primary.background),
+            colors.line_indicator.background.unwrap_or(colors.primary.foreground),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_overlay_text() {
+        assert_eq!(progress_text(Progress::Normal(7)), "7%");
+        assert_eq!(progress_text(Progress::Normal(50)), "50%");
+        assert_eq!(progress_text(Progress::Normal(100)), "100%");
+        assert_eq!(progress_text(Progress::Error(Some(42))), "42%");
+        assert_eq!(progress_text(Progress::Error(None)), "err");
+        assert_eq!(progress_text(Progress::Indeterminate), "...");
+        assert_eq!(progress_text(Progress::Warning(Some(42))), "42%");
+        assert_eq!(progress_text(Progress::Warning(None)), "wrn");
+    }
 }

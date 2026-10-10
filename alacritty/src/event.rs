@@ -38,6 +38,7 @@ use alacritty_terminal::event::{Event as TerminalEvent, EventListener, Notify};
 use alacritty_terminal::event_loop::Notifier;
 use alacritty_terminal::grid::{BidirectionalIterator, Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::progress::Progress;
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexSearch};
@@ -79,6 +80,9 @@ const TOUCH_ZOOM_FACTOR: f32 = 0.01;
 
 /// Cooldown between invocations of the bell command.
 const BELL_CMD_COOLDOWN: Duration = Duration::from_millis(100);
+
+/// Timeout after which a stale progress report is cleared.
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The event processor.
 ///
@@ -1869,6 +1873,26 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
                             self.ctx.window().set_title(title);
                         }
+                    },
+                    TerminalEvent::Progress(progress) => {
+                        let timer_id = TimerId::new(Topic::Progress, self.ctx.display.window.id());
+                        self.ctx.scheduler.unschedule(timer_id);
+
+                        self.ctx.display.progress = match progress {
+                            Progress::Hidden => None,
+                            progress => Some(progress),
+                        };
+
+                        // Clear stale progress reports from applications that no longer exist.
+                        if self.ctx.display.progress.is_some() {
+                            let event = Event::new(
+                                EventType::Terminal(TerminalEvent::Progress(Progress::Hidden)),
+                                self.ctx.display.window.id(),
+                            );
+                            self.ctx.scheduler.schedule(event, PROGRESS_TIMEOUT, false, timer_id);
+                        }
+
+                        *self.ctx.dirty = true;
                     },
                     TerminalEvent::ResetTitle => {
                         let window_config = &self.ctx.config.window;

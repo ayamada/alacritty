@@ -15,6 +15,7 @@ use log::error;
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::event::{self, Event, EventListener, WindowSize};
+use crate::progress::OscProgressFilter;
 use crate::sync::FairMutex;
 use crate::term::Term;
 use crate::{thread, tty};
@@ -150,8 +151,12 @@ where
                 writer.write_all(&buf[..unprocessed]).unwrap();
             }
 
-            // Parse the incoming bytes.
-            state.parser.advance(&mut **terminal, &buf[..unprocessed]);
+            // Extract `OSC 9;4` reports before parsing the remaining bytes.
+            let (bytes, progress) = state.progress.filter(&buf[..unprocessed]);
+            state.parser.advance(&mut **terminal, bytes);
+            for &progress in progress {
+                self.event_proxy.send_event(Event::Progress(progress));
+            }
 
             processed += unprocessed;
             unprocessed = 0;
@@ -402,6 +407,7 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    progress: OscProgressFilter,
 }
 
 impl State {

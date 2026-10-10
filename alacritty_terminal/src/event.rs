@@ -3,6 +3,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::process::ExitStatus;
 use std::sync::Arc;
 
+use crate::progress::Progress;
 use crate::term::ClipboardType;
 use crate::vte::ansi::Rgb;
 
@@ -20,6 +21,9 @@ pub enum Event {
 
     /// Reset to the default window title.
     ResetTitle,
+
+    /// Progress report from an application.
+    Progress(Progress),
 
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
@@ -67,6 +71,7 @@ impl Debug for Event {
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),
+            Event::Progress(progress) => write!(f, "Progress({progress:?})"),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),
