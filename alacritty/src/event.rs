@@ -82,7 +82,7 @@ const TOUCH_ZOOM_FACTOR: f32 = 0.01;
 const BELL_CMD_COOLDOWN: Duration = Duration::from_millis(100);
 
 /// Timeout after which a stale progress report is cleared.
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The event processor.
 ///
