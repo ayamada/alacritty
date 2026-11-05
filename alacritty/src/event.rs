@@ -82,7 +82,13 @@ const TOUCH_ZOOM_FACTOR: f32 = 0.01;
 const BELL_CMD_COOLDOWN: Duration = Duration::from_millis(100);
 
 /// Timeout after which a stale progress report is cleared.
-const PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// TODO: これをいくつにするかは悩む。ghosttyは「15秒のタイムアウトがハードコードされている」。発信源が定期的に送信する事を求めている。
+///       https://ghostty.org/docs/vt/osc/conemu
+///       一方で、iTerm2はタイムアウトなしの実装。発信源が完全に管理し、発信源が停止した場合は利用者が手で printf '\033]9;4;0\033\\' する運用。
+///       https://iterm2.com/documentation-escape-codes.html
+///       (iTerm2側のドキュメントは上記にあるが、タイムアウトに関する記載はなし。実際の実装より確認。)
+///       発信源が定期送信を行ってくれる前提であればghostty側に寄せられるが、そうでなければiTerm2側に寄せるしかないのでは？
+const PROGRESS_TIMEOUT: Duration = Duration::from_secs(86400);
 
 /// The event processor.
 ///
